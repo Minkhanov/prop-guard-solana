@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "propguard"
+version = "0.1.0"
+description = "Prop Guard — real-time prop-firm-style risk guard for Jupiter Perps traders, fed by Solami (gRPC / Mirage / RPC)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Marat Minkhanov" }]
+keywords = ["solana", "solami", "jupiter", "perps", "risk", "yellowstone", "grpc"]
+dependencies = [
+    "httpx>=0.28",
+    "websockets>=13",
+    "grpcio>=1.66",
+    "protobuf>=5.28",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "grpcio-tools>=1.66",
+]
+
+[project.scripts]
+propguard = "propguard.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["propguard*"]
+
+[tool.setuptools.package-data]
+propguard = ["decode/idl/*.json", "panel/static/*", "transports/yellowstone/proto/*.proto"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

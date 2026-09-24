@@ -1,0 +1,23 @@
+# secrets and local state — never commit
+.env
+.env.*
+!.env.example
+state/
+logs/
+scripts/chaos_proxy.ctl
+
+# python
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+dist/
+build/
+*.egg-info/
+
+# editors / os
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

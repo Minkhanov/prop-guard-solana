@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prop Guard — Jupiter Perps risk monitor (Solami)</title>
+<style>
+  :root { color-scheme: dark; --bg:#0b0f14; --card:#121924; --line:#1f2a3a; --fg:#e6edf3; --mut:#8b9bb0;
+          --ok:#3ddc97; --warn:#f5b642; --crit:#ff5c6c; --acc:#6ea8fe; }
+  * { box-sizing: border-box; }
+  body { margin:0; font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background:var(--bg); color:var(--fg); }
+  header { display:flex; align-items:center; gap:14px; padding:14px 20px; border-bottom:1px solid var(--line); }
+  header h1 { font-size:16px; margin:0; letter-spacing:.3px; }
+  header .pill { font-size:12px; padding:3px 9px; border-radius:999px; border:1px solid var(--line); color:var(--mut); }
+  header .pill.live { border-color:var(--ok); color:var(--ok); }
+  header .pill.down { border-color:var(--crit); color:var(--crit); }
+  header .pill.warn { border-color:var(--warn); color:var(--warn); }
+  main { padding:16px 20px; display:grid; gap:14px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 16px; }
+  .card h2 { margin:0 0 8px; font-size:12px; text-transform:uppercase; letter-spacing:.8px; color:var(--mut); font-weight:600; }
+  .big { font-size:26px; font-weight:600; font-variant-numeric: tabular-nums; }
+  .sub { color:var(--mut); font-size:12px; }
+  .pos { color:var(--ok);} .neg { color:var(--crit);} .warn { color:var(--warn);}
+  .bar { height:8px; background:#0e1520; border-radius:6px; overflow:hidden; margin-top:8px; border:1px solid var(--line);}
+  .bar > i { display:block; height:100%; background:var(--ok); }
+  table { width:100%; border-collapse:collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align:right; padding:6px 6px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th:first-child, td:first-child { text-align:left; }
+  th { color:var(--mut); font-weight:500; font-size:12px; }
+  .wide { grid-column: 1 / -1; }
+  .kv { display:grid; grid-template-columns: 1fr auto; gap:4px 12px; font-variant-numeric: tabular-nums; }
+  .kv span:nth-child(2n) { text-align:right; }
+  .alerts li { list-style:none; padding:6px 0; border-bottom:1px solid var(--line); }
+  .alerts ul { margin:0; padding:0; }
+  .tag { display:inline-block; font-size:11px; padding:1px 6px; border-radius:4px; margin-right:6px; border:1px solid var(--line); }
+  .tag.info { color:var(--acc);} .tag.warn { color:var(--warn);} .tag.crit { color:var(--crit); }
+  footer { padding:10px 20px; color:var(--mut); font-size:12px; border-top:1px solid var(--line); }
+  code { color:var(--acc); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Prop Guard</h1>
+  <span class="pill" id="wallet">wallet —</span>
+  <span class="pill" id="transport">transport —</span>
+  <span class="pill" id="path">path —</span>
+  <span class="pill" id="conn">connecting…</span>
+  <span class="pill" id="slot">slot —</span>
+  <span class="pill" id="tg">telegram —</span>
+</header>
+<main>
+  <section class="card">
+    <h2>Equity (open positions)</h2>
+    <div class="big" id="equity">—</div>
+    <div class="sub" id="equity_sub">collateral — · unrealized —</div>
+  </section>
+  <section class="card">
+    <h2>Daily PnL vs limit (UTC day)</h2>
+    <div class="big" id="dpnl">—</div>
+    <div class="sub" id="dpnl_sub">limit — · used —</div>
+    <div class="bar"><i id="dpnl_bar" style="width:0%"></i></div>
+    <div class="sub" id="anchor" title="Where the day's baseline comes from">anchor —</div>
+  </section>
+  <section class="card">
+    <h2>Exposure</h2>
+    <div class="big" id="expo">—</div>
+    <div class="sub" id="expo_sub">of max —</div>
+  </section>
+  <section class="card">
+    <h2>Closest liquidation</h2>
+    <div class="big" id="liq">—</div>
+    <div class="sub">distance from mark, worst position</div>
+  </section>
+
+  <section class="card wide">
+    <h2>Positions (Jupiter Perps, live oracle marks)</h2>
+    <table><thead><tr>
+      <th>Market</th><th>Side</th><th>Size $</th><th>Collateral $</th><th>Lev</th><th>Entry</th><th>Mark</th>
+      <th>PnL $</th><th>Fees $</th><th>Net $</th><th>Liq price</th><th>Liq dist %</th><th>Borrow APR</th></tr></thead>
+      <tbody id="positions"><tr><td colspan="13" class="sub">no open positions yet</td></tr></tbody></table>
+  </section>
+
+  <section class="card">
+    <h2>Stream health (what we track)</h2>
+    <div class="kv" id="health"></div>
+  </section>
+  <section class="card">
+    <h2>Resilience</h2>
+    <div class="kv" id="resil"></div>
+  </section>
+  <section class="card">
+    <h2>Oracle prices (Doves, on-chain)</h2>
+    <div class="kv" id="prices"></div>
+  </section>
+  <section class="card alerts">
+    <h2>Recent alerts</h2>
+    <ul id="alerts"><li class="sub">none</li></ul>
+  </section>
+</main>
+<footer>Data path: Solami <code id="pathfoot">—</code> → decoders → risk engine → Telegram + this panel. Read-only. Not financial advice. Numbers are estimates from on-chain state and can differ from the venue UI.</footer>
+<script>
+const $ = id => document.getElementById(id);
+const usd = v => (v == null ? '—' : (v < 0 ? '-' : '') + '$' + Math.abs(v).toLocaleString('en-US', {maximumFractionDigits: 2, minimumFractionDigits: 2}));
+const num = (v, d=2) => v == null ? '—' : Number(v).toLocaleString('en-US', {maximumFractionDigits: d, minimumFractionDigits: d});
+const sign = v => v > 0 ? 'pos' : (v < 0 ? 'neg' : '');
+function render(p) {
+  const s = p.snapshot || {}, r = p.rules || {}, h = p.health || {};
+  $('wallet').textContent = 'wallet ' + (s.wallet ? s.wallet.slice(0,4) + '…' + s.wallet.slice(-4) : '—');
+  $('transport').textContent = 'transport ' + (h.transport || '—');
+  $('path').textContent = 'path ' + (h.active_path || '—'); $('path').className = 'pill ' + (h.fallback_active ? 'warn' : '');
+  $('slot').textContent = 'slot ' + (s.slot || '—') + (h.slot_lag != null ? ' (lag ' + h.slot_lag + (h.slot_lag_raw < 0 ? ', stream ahead by ' + (-h.slot_lag_raw) : '') + ')' : '');
+  const tg = (p.alerting || {}).telegram; $('tg').textContent = 'telegram ' + (tg ? tg.mode + ' · ' + tg.sent + ' sent' : 'off');
+  $('pathfoot').textContent = (h.active_path || h.transport || '').toUpperCase();
+  $('equity').textContent = usd(s.equity_usd);
+  $('equity_sub').textContent = 'collateral ' + usd(s.collateral_usd) + ' · unrealized ' + usd(s.unrealized_net_usd);
+  $('dpnl').textContent = usd(r.daily_pnl_usd); $('dpnl').className = 'big ' + sign(r.daily_pnl_usd);
+  $('dpnl_sub').textContent = 'limit -' + usd(r.daily_loss_limit_usd) + ' · used ' + num(r.daily_limit_used_pct, 0) + '% · base ' + usd(r.base_usd) + ' · realized ' + usd(r.realized_today_usd) + ' · fees ' + usd(r.fees_today_usd);
+  $('anchor').textContent = 'anchor: ' + (r.anchor_label || '—'); $('anchor').className = 'sub ' + (r.anchor_source === 'first_observation' ? 'warn' : '');
+  const used = Math.min(100, r.daily_limit_used_pct || 0); $('dpnl_bar').style.width = used + '%';
+  $('dpnl_bar').style.background = used >= 100 ? 'var(--crit)' : used >= 80 ? 'var(--warn)' : 'var(--ok)';
+  $('expo').textContent = num(r.exposure_x, 2) + 'x'; $('expo_sub').textContent = 'of max ' + num(r.max_exposure_x, 0) + 'x · ' + usd(s.exposure_usd) + ' notional';
+  $('liq').textContent = (s.positions && s.positions.length) ? num(r.min_liq_distance_pct, 2) + '%' : '—';
+  $('liq').className = 'big ' + ((r.min_liq_distance_pct <= (p.thresholds||{}).liq_crit) ? 'neg' : (r.min_liq_distance_pct <= (p.thresholds||{}).liq_warn) ? 'warn' : '');
+  const tb = $('positions'); tb.innerHTML = '';
+  (s.positions || []).forEach(v => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${v.market}</td><td>${v.side.toUpperCase()}</td><td>${num(v.size_usd,0)}</td><td>${num(v.collateral_usd,0)}</td>
+      <td>${num(v.leverage,1)}x</td><td>${num(v.entry_price,2)}</td><td>${num(v.mark_price,2)}</td>
+      <td class="${sign(v.pnl_usd)}">${num(v.pnl_usd)}</td><td>${num(v.borrow_fee_usd + v.close_fee_usd)}</td>
+      <td class="${sign(v.net_pnl_usd)}">${num(v.net_pnl_usd)}</td><td>${num(v.liq_price,2)}</td>
+      <td class="${v.liq_distance_pct <= 2 ? 'neg' : v.liq_distance_pct <= 5 ? 'warn' : ''}">${num(v.liq_distance_pct,2)}</td><td>${num(v.borrow_apr_pct,1)}%</td>`;
+    tb.appendChild(tr);
+  });
+  if (!(s.positions || []).length) tb.innerHTML = '<tr><td colspan="13" class="sub">no open positions</td></tr>';
+  const kv = [['uptime s', h.uptime_sec], ['data messages', h.messages_total], ['msg/s (10s, data only)', h.msg_per_sec_10s], ['pings (not data)', h.pings_total],
+    ['bytes', h.bytes_total], ['account updates', h.account_updates], ['slot updates', h.slot_updates],
+    ['by filter', Object.entries(h.by_filter || {}).map(([k,v]) => k + ' ' + v).join(' · ') || '—'],
+    ['silence s (stream)', h.silence_sec], ['last update age s', h.update_age_sec], ['stream slot', h.last_stream_slot], ['rpc head slot', h.last_rpc_slot],
+    ['slot lag', h.slot_lag == null ? '—' : h.slot_lag + (h.slot_lag_raw < 0 ? ' (ahead ' + (-h.slot_lag_raw) + ')' : '')], ['oracle age s', s.oracle_age_sec]];
+  $('health').innerHTML = kv.map(([k,v]) => `<span class="sub">${k}</span><span>${v == null ? '—' : v}</span>`).join('');
+  const rv = [['active path', h.active_path], ['connects', h.connects], ['reconnects', h.reconnects], ['replays (from_slot)', h.replays],
+    ['re-bootstraps (RPC)', h.rebootstraps], ['fallback active', h.fallback_active ? 'YES for ' + h.fallback_for_sec + 's' : 'no'], ['fallbacks total', h.fallback_count],
+    ['errors', h.errors], ['last error', h.last_error || '—']];
+  $('resil').innerHTML = rv.map(([k,v]) => `<span class="sub">${k}</span><span class="${k === 'fallback active' && h.fallback_active ? 'warn' : ''}">${v == null ? '—' : v}</span>`).join('');
+  $('prices').innerHTML = Object.entries(s.prices || {}).map(([k,v]) => `<span class="sub">${k}</span><span>${num(v, k.startsWith('US') ? 4 : 2)}</span>`).join('') || '<span class="sub">—</span>';
+  const al = $('alerts'); al.innerHTML = '';
+  (p.alerts || []).slice().reverse().slice(0, 12).forEach(a => {
+    const li = document.createElement('li');
+    li.innerHTML = `<span class="tag ${a.level}">${a.level}</span>${new Date(a.ts*1000).toISOString().slice(11,19)} ${a.text}`;
+    al.appendChild(li);
+  });
+  if (!(p.alerts || []).length) al.innerHTML = '<li class="sub">none</li>';
+}
+function connect() {
+  const es = new EventSource('/events');
+  es.onopen = () => { $('conn').textContent = 'live'; $('conn').className = 'pill live'; };
+  es.onmessage = e => render(JSON.parse(e.data));
+  es.onerror = () => { $('conn').textContent = 'reconnecting'; $('conn').className = 'pill down'; };
+}
+fetch('/api/state').then(r => r.json()).then(render).finally(connect);
+</script>
+</body>
+</html>
