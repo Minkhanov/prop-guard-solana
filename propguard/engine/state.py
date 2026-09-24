@@ -32,6 +32,7 @@ class AccountSnapshot:
     unrealized_net_usd: float  # sum of net pnl
     prices: dict[str, float]
     oracle_age_sec: float
+    unpriced: list[str] = field(default_factory=list)   # open positions we cannot value yet (custody/oracle missing)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -39,7 +40,7 @@ class AccountSnapshot:
             "equity_usd": round(self.equity_usd, 2), "collateral_usd": round(self.collateral_usd, 2),
             "exposure_usd": round(self.exposure_usd, 2), "unrealized_net_usd": round(self.unrealized_net_usd, 2),
             "prices": {k: round(v, 4) for k, v in self.prices.items()}, "oracle_age_sec": round(self.oracle_age_sec, 1),
-            "positions": [p.__dict__ for p in self.positions],
+            "positions": [p.__dict__ for p in self.positions], "unpriced": list(self.unpriced),
         }
 
 
@@ -54,7 +55,9 @@ class GuardState:
     last_update_at: float = 0.0
     decode_errors: int = 0
     account_versions: dict[str, tuple[int, int]] = field(default_factory=dict)   # pubkey -> (slot, write_version)
+    raw: dict[str, bytes] = field(default_factory=dict)                            # pubkey -> last decoded bytes
     stale_dropped: int = 0
+    unchanged_skipped: int = 0
 
     # ---- ingestion -------------------------------------------------------------
     def apply(self, upd: AccountUpdate | SlotUpdate) -> str | None:
@@ -73,6 +76,10 @@ class GuardState:
                 self.stale_dropped += 1
                 return None
         self.account_versions[upd.pubkey] = (upd.slot, upd.write_version)
+        if self.raw.get(upd.pubkey) == upd.data:          # same bytes (typical for RPC polls): nothing to decode
+            self.unchanged_skipped += 1
+            return None
+        self.raw[upd.pubkey] = upd.data
         try:
             if upd.owner == JUPITER_PERPS_PROGRAM:
                 if is_position_account(upd.data):
@@ -121,6 +128,7 @@ class GuardState:
         ages = [now - self.oracles[self.oracle_for_custody[c]].timestamp
                 for c in relevant if self.oracle_for_custody.get(c) in self.oracles]
         oldest_oracle = max(ages, default=0.0)
+        unpriced: list[str] = []
         for pos in self.positions.values():
             if not pos.is_open:
                 continue
@@ -128,7 +136,8 @@ class GuardState:
             coll = self.custodies.get(pos.collateral_custody)
             oracle = self.oracles.get(self.oracle_for_custody.get(pos.custody, ""))
             if not (custody and coll and oracle):
-                continue  # not enough data yet (bootstrap in progress)
+                unpriced.append(pos.pubkey)   # open, but not valuable yet — NOT the same as closed
+                continue
             views.append(build_view(pos, self.market_name(pos.custody), custody, coll,
                                     oracle.price_1e6(), oracle.timestamp, int(now)))
         return AccountSnapshot(
@@ -137,5 +146,5 @@ class GuardState:
             collateral_usd=sum(v.collateral_usd for v in views),
             exposure_usd=sum(v.size_usd for v in views),
             unrealized_net_usd=sum(v.net_pnl_usd for v in views),
-            prices=prices, oracle_age_sec=oldest_oracle,
+            prices=prices, oracle_age_sec=oldest_oracle, unpriced=unpriced,
         )

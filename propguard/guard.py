@@ -24,7 +24,7 @@ from .engine.metrics import StreamMetrics
 from .engine.rules import Alert, RuleEngine
 from .engine.state import GuardState
 from .transports.base import AccountUpdate, SlotUpdate, Transport
-from .transports.rpc import RpcClient, RpcPollingTransport, fetch_wallet_positions
+from .transports.rpc import RpcClient, RpcPollingTransport
 
 log = logging.getLogger("propguard.guard")
 
@@ -141,8 +141,8 @@ class Guard:
             return
         while True:
             await asyncio.sleep(check_every)
-            silence = self.metrics.silence_sec()
-            if not self.metrics.fallback_active and self.metrics.last_message_at and silence > threshold:
+            silence = self.metrics.silence_sec()   # clock runs from transport start: a stream that never delivered counts
+            if not self.metrics.fallback_active and silence > threshold:
                 await self._start_fallback(silence)
             elif self.metrics.fallback_active and silence < min(2.0, threshold):
                 await self._stop_fallback()
@@ -167,7 +167,9 @@ class Guard:
             raise
         except Exception as exc:  # noqa: BLE001 — fallback must not kill the guard either
             self.metrics.on_error(f"fallback: {exc}")
-            log.warning("RPC fallback failed: %s", exc)
+            log.warning("RPC fallback failed: %s — the supervisor will start it again", exc)
+            self.fallback, self._fallback_task = None, None
+            self.metrics.on_fallback(False)          # let the supervisor retry instead of showing a dead path as active
 
     async def _stop_fallback(self) -> None:
         since = self.metrics.fallback_since
@@ -210,20 +212,13 @@ class Guard:
             await asyncio.sleep(every)
 
     # ---- wiring ---------------------------------------------------------------------
-    async def bootstrap_accounts(self) -> None:
-        """Positions + oracles over RPC (streaming transports): initial snapshot and re-bootstrap
-        after a gap that the gRPC replay window cannot cover."""
-        s = self.settings
+    async def bootstrap_accounts(self) -> int:
+        """Positions + custodies + oracles over RPC (streaming transports): the initial snapshot and the
+        re-bootstrap after a gap the gRPC replay window cannot cover. Returns the snapshot slot so the
+        stream can resume from it (no gap between the snapshot and the first streamed frame)."""
         oracles = self.state.oracle_pubkeys() or list(DOVES_ORACLES_FALLBACK.values())
-        _, positions = await fetch_wallet_positions(self.rpc, s.wallet, "confirmed")
-        for p in positions:
-            await self.on_update(AccountUpdate(p.pubkey, p.owner, p.data, p.slot, source="bootstrap"))
-        slot, oracle_updates = await self.rpc.get_multiple_accounts(oracles, "confirmed")
-        for u in oracle_updates:
-            if u is not None:
-                await self.on_update(AccountUpdate(u.pubkey, u.owner, u.data, u.slot, source="bootstrap"))
-        await self.on_update(SlotUpdate(slot, "confirmed", source="bootstrap"))
-        log.info("bootstrap: %d position accounts, %d oracles, slot %d", len(positions), len(oracles), slot)
+        t = RpcPollingTransport(self.rpc, self.settings.wallet, extra_accounts=list(CUSTODIES.values()) + oracles)
+        return await t.bootstrap(self.on_update)
 
     async def build_transport(self) -> Transport:
         s = self.settings
@@ -239,13 +234,15 @@ class Guard:
                                     extra_accounts=custodies + oracles)
             await t.bootstrap(self.on_update)   # complete snapshot before any rule fires
             return t
-        # streaming transports: bootstrap positions + oracles over RPC, then stream
-        await self.bootstrap_accounts()
+        # streaming transports: bootstrap positions + oracles over RPC, then stream from that slot
+        slot = await self.bootstrap_accounts()
         if s.transport == "grpc":
             from .transports.grpc_yellowstone import GrpcTransport
-            return GrpcTransport(s.grpc_endpoint, s.grpc_key, s.wallet, custodies, oracles, commitment=s.commitment,
-                                 metrics=self.metrics, head_slot=lambda: self.rpc.get_slot("processed"),
-                                 rebootstrap=self.bootstrap_accounts, tls_server_name=s.solami_grpc_tls_server_name)
+            t = GrpcTransport(s.grpc_endpoint, s.grpc_key, s.wallet, custodies, oracles, commitment=s.commitment,
+                              metrics=self.metrics, head_slot=lambda: self.rpc.get_slot("processed"),
+                              rebootstrap=self.bootstrap_accounts, tls_server_name=s.solami_grpc_tls_server_name)
+            t.last_slot = slot    # first subscription replays from the snapshot slot: nothing written in between is lost
+            return t
         from .transports.mirage import MirageTransport
         return MirageTransport(s.mirage_url, s.solami_api_key, metrics=self.metrics)
 
@@ -255,6 +252,7 @@ class Guard:
         self.alert_ctx.transport = self.transport.name
         self.ready = True
         self._dirty.set()   # first evaluation on the complete bootstrap snapshot (anchors the day)
+        self.metrics.on_stream_started()
         tasks = [asyncio.create_task(self.transport.run(self.on_update), name="transport"),
                  asyncio.create_task(self._tick_loop(), name="tick"),
                  asyncio.create_task(self._rpc_head_loop(), name="rpc-head")]
@@ -274,6 +272,15 @@ class Guard:
             for t in done:
                 if t.exception():
                     raise t.exception()  # type: ignore[misc]
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — say it before dying: a silent guard is the worst failure mode
+            try:
+                await self.router.dispatch([Alert("crit", "guard_down", f"guard_down:{int(time.time())}",
+                                                  f"GUARD STOPPED: {type(exc).__name__}: {str(exc)[:200]} — you are not protected until it is restarted")])
+            except Exception:  # noqa: BLE001
+                pass
+            raise
         finally:
             for t in tasks:
                 t.cancel()
@@ -287,8 +294,6 @@ class Guard:
     async def once(self) -> dict[str, Any]:
         """One-shot snapshot (bootstrap only) — used by `propguard positions`."""
         t = await self.build_transport()
-        if isinstance(t, RpcPollingTransport) and not t.bootstrapped:
-            await t.bootstrap(self.on_update)
         snap = self.state.snapshot()
         await self.rpc.close()
         return {"snapshot": snap.to_dict(), "rules": self.rules.summary(snap), "decode_errors": self.state.decode_errors,

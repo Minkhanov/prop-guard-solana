@@ -44,7 +44,19 @@ def test_state_drops_stale_account_frames(mainnet_accounts):
     assert st.apply(AccountUpdate(fx["pubkey"], fx["owner"], fx["data"], 1_000, 5, source="grpc")) == "oracle"
     assert st.apply(AccountUpdate(fx["pubkey"], fx["owner"], fx["data"], 900, 9, source="grpc")) is None      # older slot
     assert st.apply(AccountUpdate(fx["pubkey"], fx["owner"], fx["data"], 1_000, 5, source="grpc")) is None    # duplicate
-    assert st.apply(AccountUpdate(fx["pubkey"], fx["owner"], fx["data"], 1_000, 6, source="grpc")) == "oracle"  # newer write
-    assert st.apply(AccountUpdate(fx["pubkey"], fx["owner"], fx["data"], 1_001, 0, source="rpc")) == "oracle"   # RPC, newer slot
-    assert st.apply(AccountUpdate(fx["pubkey"], fx["owner"], fx["data"], 1_001, 0, source="rpc")) == "oracle"   # RPC re-poll, same slot ok
-    assert st.stale_dropped == 2
+    changed = bytearray(fx["data"]); changed[-1] ^= 1                                                         # different bytes
+    assert st.apply(AccountUpdate(fx["pubkey"], fx["owner"], bytes(changed), 1_000, 6, source="grpc")) == "oracle"  # newer write
+    assert st.apply(AccountUpdate(fx["pubkey"], fx["owner"], bytes(changed), 1_001, 0, source="rpc")) is None   # RPC, same bytes: no decode
+    assert st.apply(AccountUpdate(fx["pubkey"], fx["owner"], fx["data"], 1_002, 0, source="rpc")) == "oracle"   # RPC, newer slot, new bytes
+    assert st.apply(AccountUpdate(fx["pubkey"], fx["owner"], bytes(changed), 1_001, 9, source="grpc")) is None  # older slot again
+    assert st.stale_dropped == 3 and st.unchanged_skipped == 1
+
+
+def test_silence_clock_starts_with_the_transport():
+    m = StreamMetrics(transport="grpc")
+    assert m.silence_sec() == 0.0
+    m.on_stream_started()
+    m.last_message_at -= 30
+    assert m.silence_sec() >= 30 and m.messages_total == 0
+    m.on_message(10)
+    assert m.silence_sec() < 1

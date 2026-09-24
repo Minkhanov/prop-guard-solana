@@ -78,6 +78,12 @@ class StreamMetrics:
         self.last_rpc_slot = slot
         self.last_rpc_slot_at = time.time()
 
+    def on_stream_started(self) -> None:
+        """Start the silence clock when the transport starts — a stream that never delivers a single
+        frame must look exactly as silent as one that died (otherwise fallback/alerts never fire)."""
+        if not self.last_message_at:
+            self.last_message_at = time.time()
+
     def on_connected(self) -> None:
         self.connects += 1
 

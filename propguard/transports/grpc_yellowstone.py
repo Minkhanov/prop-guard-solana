@@ -104,10 +104,12 @@ class GrpcTransport(Transport):
         self.connected = asyncio.Event()
 
     # ---- replay decision -------------------------------------------------------------
-    async def _plan_reconnect(self) -> int | None:
-        """Decide `from_slot` for the next subscription. Returns None when starting from the head."""
+    async def _plan_reconnect(self) -> tuple[int | None, str]:
+        """Decide `from_slot` for the next subscription → (from_slot, mode) with mode one of
+        "head" (nothing known yet), "replay" (inside the replay window) or "rebootstrap" (gap too large or
+        from_slot rejected: the account set was re-fetched over RPC and the stream resumes from that snapshot's slot)."""
         if not self.last_slot:
-            return None
+            return None, "head"
         if self._force_rebootstrap:
             reason = "server rejected from_slot"
         else:
@@ -121,16 +123,17 @@ class GrpcTransport(Transport):
             if gap <= GRPC_REPLAY_MAX_SLOTS - REPLAY_SAFETY_MARGIN:
                 if gap > 0:
                     log.info("replaying %d slots via from_slot", gap)
-                return max(self.last_slot - 1, 1)
+                return max(self.last_slot - 1, 1), "replay"
             reason = f"gap {gap} slots exceeds the replay window ({GRPC_REPLAY_MAX_SLOTS})"
-        log.warning("%s — re-bootstrapping over RPC and subscribing from the head", reason)
+        log.warning("%s — re-bootstrapping over RPC", reason)
         self._force_rebootstrap = False
         self.last_slot = None
         if self.rebootstrap:
-            await self.rebootstrap()
-        if self.metrics:
-            self.metrics.rebootstraps += 1
-        return None
+            slot = await self.rebootstrap()          # may raise: handled by the run loop as a transport failure
+            if slot:
+                self.last_slot = int(slot)
+                return max(self.last_slot - 1, 1), "rebootstrap"   # no gap between the snapshot and the stream
+        return None, "rebootstrap"
 
     def _channel(self, grpc):
         options = [("grpc.max_receive_message_length", 64 * 1024 * 1024),
@@ -146,21 +149,16 @@ class GrpcTransport(Transport):
         import grpc  # local import: optional dependency at runtime for rpc-only users
         geyser_pb2, geyser_pb2_grpc = _load_stubs()
         backoff = self.backoff_initial_s
-        first = True
+        attempt = 0
         while not self._stop.is_set():
-            if not first:
-                if self.metrics:
-                    self.metrics.on_reconnect(replayed=bool(self.last_slot) and not self._force_rebootstrap)
+            if attempt:
                 await asyncio.sleep(backoff + random.uniform(0, backoff / 2))
                 backoff = min(backoff * 2, self.backoff_max_s)
                 if self._stop.is_set():
                     break
-            first = False
-            from_slot = await self._plan_reconnect()
-            self.last_from_slot = from_slot
-            request = build_subscribe_request(self.wallet, self.custodies, self.oracles, self.commitment, from_slot)
+            attempt += 1
             outbound: asyncio.Queue = asyncio.Queue()
-            await outbound.put(request)
+            from_slot = None
 
             async def requests():
                 while True:
@@ -170,6 +168,11 @@ class GrpcTransport(Transport):
                     yield item
 
             try:
+                from_slot, mode = await self._plan_reconnect()   # may re-bootstrap over RPC (can fail → retry)
+                self.last_from_slot = from_slot
+                if attempt > 1 and self.metrics:
+                    self.metrics.on_reconnect(replayed={"replay": True, "rebootstrap": False}.get(mode))
+                await outbound.put(build_subscribe_request(self.wallet, self.custodies, self.oracles, self.commitment, from_slot))
                 async with self._channel(grpc) as channel:
                     stub = geyser_pb2_grpc.GeyserStub(channel)
                     log.info("gRPC subscribe %s (commitment=%s, from_slot=%s)", self.endpoint, self.commitment, from_slot)

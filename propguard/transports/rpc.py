@@ -116,19 +116,14 @@ class RpcClient:
                 payload = resp.json()
                 if "error" in payload:
                     err = payload["error"] if isinstance(payload["error"], dict) else {"message": str(payload["error"])}
-                    code = err.get("code")
-                    exc = RpcError(method, code, self._redact(str(err.get("message", err))))
-                    if code in _DETERMINISTIC_RPC_ERRORS:
-                        self.stats["errors"] += 1
-                        raise exc                      # retrying "Invalid params" only wastes 7.5 s
-                    raise exc
+                    raise RpcError(method, err.get("code"), self._redact(str(err.get("message", err))))
                 return payload["result"]
             except PermissionError:
                 raise
             except RpcError as exc:
-                if exc.code in _DETERMINISTIC_RPC_ERRORS:
-                    raise
                 self.stats["errors"] += 1
+                if exc.code in _DETERMINISTIC_RPC_ERRORS:
+                    raise                              # retrying "Invalid params" only wastes 7.5 s
                 if attempt >= retries:
                     raise RuntimeError(f"RPC {method} failed after {retries} retries: {exc}") from None
                 log.warning("RPC %s failed (%s); retry in %.1fs", method, exc, delay)
@@ -234,7 +229,8 @@ class RpcPollingTransport(Transport):
     name = "rpc"
 
     def __init__(self, rpc: RpcClient, wallet: str, *, interval_ms: int = 1500, commitment: str = "processed",
-                 rescan_every_s: float = 30.0, extra_accounts: list[str] | None = None, source: str = "rpc"):
+                 rescan_every_s: float = 30.0, extra_accounts: list[str] | None = None, source: str = "rpc",
+                 metrics: Any | None = None):
         self.rpc = rpc
         self.wallet = wallet
         self.interval = max(interval_ms, 200) / 1000
@@ -243,44 +239,68 @@ class RpcPollingTransport(Transport):
         self.extra_accounts = list(extra_accounts or [])
         self.position_keys: list[str] = []
         self.bootstrapped = False
+        self.bootstrap_slot = 0
         self.source = source
+        self.metrics = metrics
         self.polls = 0
+        self.errors = 0
         self._stop = asyncio.Event()
 
-    async def bootstrap(self, handler: UpdateHandler) -> None:
-        self.bootstrapped = True
+    async def bootstrap(self, handler: UpdateHandler) -> int:
+        """Complete snapshot over RPC: the wallet's Position accounts, then the extra accounts (custodies,
+        oracles). Returns the context slot of the position scan — the streaming transports replay from it.
+        Also used by the guard to (re-)bootstrap the gRPC/Mirage paths."""
         slot, positions = await fetch_wallet_positions(self.rpc, self.wallet, "confirmed")
         self.position_keys = [p.pubkey for p in positions]
         for p in positions:
             await handler(AccountUpdate(p.pubkey, p.owner, p.data, p.slot, source="bootstrap"))
-        _, extras = await self.rpc.get_multiple_accounts(self.extra_accounts, "confirmed")
-        for u in extras:
-            if u is not None:
-                await handler(AccountUpdate(u.pubkey, u.owner, u.data, u.slot, source="bootstrap"))
+        extras: list = []
+        if self.extra_accounts:
+            _, extras = await self.rpc.get_multiple_accounts(self.extra_accounts, "confirmed")
+            for u in extras:
+                if u is not None:
+                    await handler(AccountUpdate(u.pubkey, u.owner, u.data, u.slot, source="bootstrap"))
         await handler(SlotUpdate(slot, "confirmed", source="bootstrap"))
+        self.bootstrapped, self.bootstrap_slot = True, slot
         log.info("bootstrap: %d position accounts, %d extra accounts, slot %d", len(positions), len(extras), slot)
+        return slot
 
     async def run(self, handler: UpdateHandler) -> None:
-        if not self.bootstrapped:
-            await self.bootstrap(handler)
+        """Poll until closed. RPC failures (429 bursts, outages) are logged, counted and retried with a
+        backoff — the polling transport must survive them just like the streaming ones do."""
+        backoff = 1.0
         last_rescan = time.monotonic()
         while not self._stop.is_set():
             t0 = time.monotonic()
-            keys = self.position_keys + self.extra_accounts
-            if keys:
-                slot, updates = await self.rpc.get_multiple_accounts(keys, self.commitment)
-                self.polls += 1
-                for u in updates:
-                    if u is not None:
-                        await handler(AccountUpdate(u.pubkey, u.owner, u.data, u.slot, source=self.source))
-                await handler(SlotUpdate(slot, self.commitment, source=self.source))
-            if time.monotonic() - last_rescan >= self.rescan_every:
-                _, positions = await fetch_wallet_positions(self.rpc, self.wallet, "confirmed")
-                self.position_keys = [p.pubkey for p in positions]
-                last_rescan = time.monotonic()
-            elapsed = time.monotonic() - t0
             try:
-                await asyncio.wait_for(self._stop.wait(), timeout=max(0.0, self.interval - elapsed))
+                if not self.bootstrapped:
+                    await self.bootstrap(handler)
+                keys = self.position_keys + self.extra_accounts
+                if keys:
+                    slot, updates = await self.rpc.get_multiple_accounts(keys, self.commitment)
+                    self.polls += 1
+                    for u in updates:
+                        if u is not None:
+                            await handler(AccountUpdate(u.pubkey, u.owner, u.data, u.slot, source=self.source))
+                    await handler(SlotUpdate(slot, self.commitment, source=self.source))
+                if time.monotonic() - last_rescan >= self.rescan_every:
+                    _, positions = await fetch_wallet_positions(self.rpc, self.wallet, "confirmed")
+                    self.position_keys = [p.pubkey for p in positions]
+                    last_rescan = time.monotonic()
+                backoff = 1.0
+                wait = max(0.0, self.interval - (time.monotonic() - t0))
+            except PermissionError:
+                raise
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — RuntimeError after retries, decode of a bad body, …
+                self.errors += 1
+                if self.metrics:
+                    self.metrics.on_error(f"rpc-poll: {str(exc)[:120]}")
+                log.warning("RPC poll failed (%s) — retrying in %.0fs", exc, backoff)
+                wait, backoff = backoff, min(backoff * 2, 30.0)
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=wait)
             except asyncio.TimeoutError:
                 pass
 

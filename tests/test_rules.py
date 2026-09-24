@@ -160,3 +160,50 @@ def test_stream_stale_alert_mentions_fallback(tmp_path):
                                          "active_path": "rpc-fallback", "fallback_active": True, "slot_lag": 0})
     txt = [x.text for x in a if x.code == "stream_stale"][0]
     assert "rpc-fallback" in txt and "RPC fallback is feeding" in txt
+
+
+# ---- review fixes (2026-09-24 evening) -----------------------------------------------------------
+def test_empty_wallet_then_first_position_sets_base(tmp_path):
+    e = engine(tmp_path, base=0.0)
+    a = e.evaluate(snap(DAY, []))                                  # anchored on an empty wallet
+    assert e.base_usd() == 0.0 and ("warn", "no_base") not in codes(a)
+    a = e.evaluate(snap(DAY + 5, [view(size=1000.0, coll=100.0, net=-90.0)]))
+    assert ("info", "base_set") in codes(a) and e.base_usd() == 10.0     # net value 100 - 90
+    a = e.evaluate(snap(DAY + 6, [view(size=1000.0, coll=100.0, net=-95.0)]))
+    assert ("crit", "daily_loss") in codes(a) and ("warn", "exposure") in codes(a)
+
+
+def test_unpriced_position_is_not_a_close(tmp_path):
+    from propguard.engine.state import AccountSnapshot
+    e = engine(tmp_path)
+    e.evaluate(snap(DAY, [view(net=-30.0)]))
+    s2 = AccountSnapshot("w", DAY + 5, 1, [], 0.0, 0.0, 0.0, 0.0, {}, 1.0, unpriced=["p1"])   # oracle vanished
+    a = e.evaluate(s2)
+    assert ("info", "position_close") not in codes(a) and ("warn", "unpriced") in codes(a)
+    assert e.book.realized_today_usd == 0.0 and "p1" in e.book.anchor_net_pnl
+    a = e.evaluate(snap(DAY + 10, [view(net=-40.0)]))              # priced again: no "open", continuity kept
+    assert ("info", "position_open") not in codes(a) and e.daily_pnl(snap(DAY + 10, [view(net=-40.0)])) == -10.0
+
+
+def test_restart_reports_positions_closed_while_down(tmp_path):
+    e = engine(tmp_path)
+    e.evaluate(snap(DAY, [view(net=-400.0), view(pk="p2", net=5.0)]))
+    e2 = engine(tmp_path)                                          # restarted: p1 is gone
+    a = e2.evaluate(snap(DAY + 600, [view(pk="p2", net=5.0)]))
+    assert ("warn", "closed_unobserved") in codes(a)
+    assert "p1" not in e2.book.anchor_net_pnl and e2.daily_pnl(snap(DAY + 600, [view(pk="p2", net=5.0)])) == 0.0
+
+
+def test_stream_stale_fires_even_if_nothing_was_ever_received(tmp_path):
+    e = engine(tmp_path, stream_stale_sec=20)
+    a = e.evaluate(snap(DAY, [view()]), {"messages_total": 0, "silence_sec": 45, "transport": "grpc", "slot_lag": None})
+    assert ("warn", "stream_stale") in codes(a)
+
+
+def test_state_file_written_only_on_change(tmp_path):
+    e = engine(tmp_path)
+    e.evaluate(snap(DAY, [view(net=-1.0)]))
+    m1 = (tmp_path / "state.json").stat().st_mtime_ns
+    for i in range(5):
+        e.evaluate(snap(DAY + 1 + i, [view(net=-1.0)]))            # nothing changes in the book
+    assert (tmp_path / "state.json").stat().st_mtime_ns == m1

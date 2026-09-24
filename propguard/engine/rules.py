@@ -131,15 +131,30 @@ class RuleEngine:
             except (ValueError, OSError) as exc:
                 log.warning("cannot read state file %s: %s", self.state_path, exc)
 
-    def _save(self) -> None:
+    _last_saved: str = ""
+    _last_saved_at: float = 0.0
+
+    def _save(self, *, min_interval_s: float = 2.0) -> None:
+        """Persist the daily book — only when it changed, and not more often than every `min_interval_s`
+        (evaluate() runs several times a second on a live stream; peak/trough alone would otherwise
+        rewrite the file on every tick)."""
+        body = json.dumps(self.book.to_dict(), sort_keys=True)
+        if body == self._last_saved:
+            return
+        if time.time() - self._last_saved_at < min_interval_s and self.book.day == self._last_saved_day():
+            return
         try:
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.state_path.with_suffix(".tmp")
             tmp.write_text(json.dumps({"wallet": self.s.wallet, "book": self.book.to_dict(), "saved_at": time.time()}, indent=1),
                            encoding="utf-8")
             tmp.replace(self.state_path)
+            self._last_saved, self._last_saved_at = body, time.time()
         except OSError as exc:
             log.warning("cannot write state file %s: %s", self.state_path, exc)
+
+    def _last_saved_day(self) -> str:
+        return json.loads(self._last_saved).get("day", "") if self._last_saved else ""
 
     # ---- base for % rules --------------------------------------------------------
     def base_usd(self) -> float:
@@ -187,7 +202,23 @@ class RuleEngine:
             # a rollover observed while running (previous book was yesterday) is a true 00:00 UTC anchor
             live_rollover = self.initialized and bool(self.book.day)
             alerts.append(self._anchor_day(snap, today, live_rollover=live_rollover))
+        elif not self.initialized and self.book.anchor_net_pnl:
+            # restored book, same day: positions the book knew but the first snapshot does not have were
+            # closed while the guard was down — their result cannot be recovered from on-chain state
+            seen = {v.pubkey for v in snap.positions} | set(snap.unpriced)
+            gone = [pk for pk in self.book.anchor_net_pnl if pk not in seen]
+            for pk in gone:
+                self.book.anchor_net_pnl.pop(pk, None); self.book.anchor_realised.pop(pk, None)
+            if gone:
+                alerts.append(Alert("warn", "closed_unobserved", f"closed_unobserved:{int(snap.ts)}",
+                                    f"{len(gone)} position(s) closed while the guard was down — their result is NOT in today's PnL"))
         cur = {v.pubkey: v for v in snap.positions}
+        if self.s.account_size_usd <= 0 and self.book.anchor_equity_usd <= 0 and snap.equity_usd > 0:
+            # anchored on an empty wallet: the base for % rules is taken from the first valued equity
+            self.book.anchor_equity_usd = snap.equity_usd
+            alerts.append(Alert("info", "base_set", f"base_set:{self.book.day}",
+                                f"Base for % rules set from the first open position: ${snap.equity_usd:,.2f} "
+                                f"(set ACCOUNT_SIZE_USD for a fixed base)"))
         # events: open / close / size change / fee settlements
         for pk, v in cur.items():
             prev = self.last_positions.get(pk)
@@ -236,14 +267,14 @@ class RuleEngine:
                                         f"COLLATERAL {v.market} {v.side.upper()} ${prev.collateral_usd:,.0f} -> ${v.collateral_usd:,.0f} "
                                         f"(not PnL; borrow fee settled ${settled_fee:,.2f}), liq {v.liq_price:,.2f}"))
         for pk, prev in self.last_positions.items():
-            if pk not in cur:
+            if pk not in cur and pk not in snap.unpriced:   # unpriced = still open, just not valuable right now
                 realized = prev.net_pnl_usd - self.book.anchor_net_pnl.pop(pk, 0.0)
                 self.book.anchor_realised.pop(pk, None)
                 self.book.realized_today_usd += realized
                 alerts.append(Alert("info", "position_close", f"close:{pk}:{int(snap.ts)}",
                                     f"CLOSE {prev.market} {prev.side.upper()} ${prev.size_usd:,.0f} — realized today ≈ {realized:+,.2f} USD "
                                     f"(last mark {prev.mark_price:,.2f}; the program zeroes realisedPnlUsd on full close)"))
-        self.last_positions = cur
+        self.last_positions = {**{pk: v for pk, v in self.last_positions.items() if pk in snap.unpriced}, **cur}
         self.initialized = True
 
         # R1 daily loss
@@ -252,6 +283,12 @@ class RuleEngine:
         self.book.peak_daily_pnl = max(self.book.peak_daily_pnl, dpnl)
         self.book.trough_daily_pnl = min(self.book.trough_daily_pnl, dpnl)
         anchor = self.book.anchor_label().split(" (")[0]
+        if base <= 0 and (snap.positions or snap.unpriced):
+            alerts.append(Alert("warn", "no_base", f"no_base:{self.book.day}",
+                                "No base for % rules (equity 0 and ACCOUNT_SIZE_USD unset) — daily-loss and exposure rules are inactive"))
+        if snap.unpriced:
+            alerts.append(Alert("warn", "unpriced", "health:unpriced",
+                                f"{len(snap.unpriced)} open position(s) cannot be valued yet (custody/oracle account missing) — not counted as closed"))
         if base > 0:
             limit = base * self.s.daily_loss_limit_pct / 100
             used = -dpnl / limit if dpnl < 0 else 0.0
@@ -285,8 +322,8 @@ class RuleEngine:
             alerts.append(Alert("warn", "oracle_stale", "health:oracle",
                                 f"Oracle price is {snap.oracle_age_sec:.0f}s old — risk numbers may be stale"))
         if health:
-            silence = health.get("silence_sec", 0)
-            if health.get("messages_total", 0) and silence > self.s.stream_stale_sec:
+            silence = health.get("silence_sec", 0)   # clock starts with the transport: "never delivered" is silence too
+            if silence > self.s.stream_stale_sec:
                 path = health.get("active_path") or health.get("transport")
                 extra = " — RPC fallback is feeding the guard" if health.get("fallback_active") else " — check connection"
                 alerts.append(Alert("warn", "stream_stale", "health:stream",

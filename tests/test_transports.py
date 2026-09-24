@@ -252,15 +252,17 @@ async def test_grpc_gap_beyond_replay_window_rebootstraps():
 
     async def reboot():
         calls["boot"] += 1
+        return 99_950                          # slot of the fresh RPC snapshot
 
     m = StreamMetrics(transport="grpc")
     t = GrpcTransport("x:1", "tok", WALLET, [], [], metrics=m, head_slot=head, rebootstrap=reboot)
+    assert await t._plan_reconnect() == (None, "head")
     t.last_slot = 99_000                       # 1,000 slots behind: inside the 3,500-slot window
-    assert await t._plan_reconnect() == 98_999 and calls["boot"] == 0
-    t.last_slot = 90_000                       # 10,000 behind: outside -> re-bootstrap, subscribe from head
-    assert await t._plan_reconnect() is None and calls["boot"] == 1 and t.last_slot is None and m.rebootstraps == 1
+    assert await t._plan_reconnect() == (98_999, "replay") and calls["boot"] == 0
+    t.last_slot = 90_000                       # 10,000 behind: outside -> re-bootstrap, resume from the snapshot slot
+    assert await t._plan_reconnect() == (99_949, "rebootstrap") and calls["boot"] == 1 and t.last_slot == 99_950
     t.last_slot = 99_990; t._force_rebootstrap = True    # server said the from_slot is not replayable
-    assert await t._plan_reconnect() is None and calls["boot"] == 2
+    assert await t._plan_reconnect() == (99_949, "rebootstrap") and calls["boot"] == 2
 
 
 # ---- Mirage on a local WebSocket server ------------------------------------------------------------

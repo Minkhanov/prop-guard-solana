@@ -33,7 +33,11 @@ def _setup_logging(level: str) -> None:
 def _settings(args: argparse.Namespace, *, need_wallet: bool) -> Settings:
     overrides = {k: getattr(args, k, None) for k in ("transport", "wallet", "solami_rpc_url", "solami_region", "commitment",
                                                      "health_log_file", "alerts_dry_run")}
-    s = load_settings(getattr(args, "env", None), overrides)
+    try:
+        s = load_settings(getattr(args, "env", None), overrides)
+    except ValueError as exc:                       # e.g. RPC_RPS=5,0 — a config problem, not a traceback
+        print(f"Configuration problems:\n  - {exc}", file=sys.stderr)
+        raise SystemExit(2)
     probs = s.problems(need_wallet=need_wallet)
     if probs:
         print("Configuration problems:", file=sys.stderr)
@@ -44,7 +48,11 @@ def _settings(args: argparse.Namespace, *, need_wallet: bool) -> Settings:
 
 
 def cmd_check_config(args: argparse.Namespace) -> int:
-    s = load_settings(args.env, {k: getattr(args, k, None) for k in ("transport", "wallet", "solami_rpc_url", "solami_region")})
+    try:
+        s = load_settings(args.env, {k: getattr(args, k, None) for k in ("transport", "wallet", "solami_rpc_url", "solami_region")})
+    except ValueError as exc:
+        print(f"Configuration problems:\n  - {exc}", file=sys.stderr)
+        return 2
     probs = s.problems(need_wallet=False)
     print(f"propguard {__version__} — configuration ({args.env or '.env'} + environment)\n")
     for k, v in s.masked().items():
@@ -229,7 +237,11 @@ def main(argv: list[str] | None = None) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # before --help output on Windows consoles
     args = build_parser().parse_args(argv)
-    level = args.log_level or load_settings(args.env).log_level
+    try:
+        level = args.log_level or load_settings(args.env).log_level
+    except ValueError as exc:
+        print(f"Configuration problems:\n  - {exc}", file=sys.stderr)
+        return 2
     _setup_logging(level)
     try:
         return int(args.fn(args) or 0)

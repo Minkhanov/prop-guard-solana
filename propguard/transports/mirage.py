@@ -109,11 +109,13 @@ class MirageTransport(Transport):
 
 
 def mirage_filter(wallet_positions: list[str], custodies: list[str], oracles: list[str], commitment: str) -> dict[str, Any]:
-    """Body for POST https://api.solami.dev/mirage/create (label + filter).
+    """Suggested body for POST https://api.solami.dev/mirage/create (label + filter) when you create the
+    saved subscription by hand.
 
-    Mirage's saved filter streams account-state updates for explicit addresses
-    (`accounts`); new position PDAs of the wallet are picked up by the periodic
-    RPC rescan and the subscription is updated via POST /mirage/update.
+    Known limitation (not implemented): a Mirage saved filter lists explicit addresses, so a position
+    PDA the wallet opens on a *new* market is not in the stream until the subscription is updated
+    (`POST /mirage/update`). Prop Guard does not do that yet — with TRANSPORT=mirage, watch the
+    `unpriced`/`position_open` alerts or restart the guard after opening a new market.
     """
     return {"accounts": wallet_positions + custodies + oracles, "slots": True, "commitment": commitment}
 
