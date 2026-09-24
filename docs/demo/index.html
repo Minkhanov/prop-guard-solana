@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prop Guard — demo</title>
+<meta name="description" content="Prop Guard: a live prop-firm risk guard for Jupiter Perps traders on Solana mainnet, fed by Solami gRPC + RPC. Demo video.">
+<style>
+  :root { color-scheme: dark; --bg:#0b0f14; --card:#121924; --line:#1f2a3a; --fg:#e6edf3; --mut:#8b9bb0; --acc:#6ea8fe; --ok:#3ddc97; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 1180px; margin: 0 auto; padding: 32px 16px 48px; }
+  h1 { font-size: 28px; margin: 0 0 6px; letter-spacing: .2px; }
+  .sub { color: var(--mut); margin: 0 0 22px; }
+  video { width: 100%; height: auto; border-radius: 12px; border: 1px solid var(--line); background: #000; display: block; }
+  .links { display: flex; flex-wrap: wrap; gap: 10px; margin: 18px 0 26px; }
+  .links a { color: var(--fg); text-decoration: none; border: 1px solid var(--line); background: var(--card); padding: 8px 14px; border-radius: 999px; font-size: 14px; }
+  .links a:hover { border-color: var(--acc); }
+  .pill { color: var(--ok); border: 1px solid var(--ok); border-radius: 999px; padding: 2px 10px; font-size: 12px; vertical-align: middle; margin-left: 8px; }
+  ol { color: var(--mut); padding-left: 20px; }
+  ol b { color: var(--fg); font-weight: 600; }
+  code { color: var(--acc); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Prop Guard <span class="pill">live on Solana mainnet · Solami</span></h1>
+  <p class="sub">A prop-firm risk guard for Jupiter Perps traders: daily loss limit on the UTC day, liquidation alarms, exposure, Telegram alerts and a stream-health panel — fed by Solami Yellowstone gRPC with RPC fallback and <code>from_slot</code> replay.</p>
+  <video controls playsinline preload="metadata" poster="poster.jpg">
+    <source src="prop-guard-demo.mp4" type="video/mp4">
+    Your browser cannot play this video. <a href="prop-guard-demo.mp4">Download the MP4</a>.
+  </video>
+  <div class="links">
+    <a href="https://github.com/Minkhanov/prop-guard-solana">GitHub repository</a>
+    <a href="https://github.com/Minkhanov/prop-guard-solana#readme">README · run it with your own Solami key</a>
+    <a href="prop-guard-demo.mp4" download>Download MP4</a>
+  </div>
+  <ol>
+    <li><b>Live data.</b> The real guard on mainnet: positions, custodies and Doves oracles decoded from the Solami gRPC stream; slot lag vs the RPC head, oracle age, data vs pings.</li>
+    <li><b>Trader value.</b> Liquidation price from Jupiter's own formula in exact integer math — matched against Jupiter's API on camera; daily loss vs limit with the anchor source stated.</li>
+    <li><b>Resilience, for real.</b> A chaos proxy pauses the stream: after 15 s of silence the guard switches to RPC polling by itself and hands back when bytes flow again. Then the connection is dropped: reconnect with <code>from_slot</code> replay.</li>
+    <li><b>Alerts.</b> Telegram alerts with dedup and cooldown — the ones in the video were really sent.</li>
+  </ol>
+  <p class="sub">Recorded on 2026-09-24 from the running system (no mock data). The wallet shown is a public Jupiter Perps wallet picked for the demo; Prop Guard is read-only — no keys, no transactions.</p>
+</main>
+</body>
+</html>

@@ -3,13 +3,15 @@
 [![ci](https://github.com/Minkhanov/prop-guard-solana/actions/workflows/ci.yml/badge.svg)](https://github.com/Minkhanov/prop-guard-solana/actions)
 License: MIT · Python 3.11+ · Solana mainnet · read-only · not financial advice
 
+**▶ Demo video (recorded live on mainnet): https://minkhanov.github.io/prop-guard-solana/demo/**
+
 Prop Guard watches a trader's **Jupiter Perpetuals** positions on Solana mainnet **in real time** through
 **Solami** (Yellowstone gRPC with `from_slot` replay, JSON-RPC bootstrap/polling, Mirage) and applies the
 rules a funded prop-firm trader lives with on a CEX desk: a **daily loss limit** on the UTC day, an
 **exposure ceiling**, **liquidation-distance alarms** and **data-health checks** — with **Telegram alerts** and
 a **live panel that shows the health of the data stream** (msg/s, slot lag, reconnects, replays, fallback).
 
-Built by a funded prop trader who runs exactly these guards on a centralized perps account and wanted the
+Built by a prop-firm challenge trader who runs exactly these guards on a centralized perps account and wanted the
 same discipline on-chain. On Jupiter a liquidation costs the whole position collateral, and the wallet
 does not ring when you are 2 % away. Prop Guard does — and it tells you when *it* has gone blind.
 
@@ -74,7 +76,7 @@ python -m venv .venv && . .venv/bin/activate          # Windows: .venv\Scripts\a
 pip install -e ".[dev]"
 cp .env.example .env                                   # then put SOLAMI_API_KEY=sk_... in it
 propguard check-config                                 # prints masked settings, exit 0 = good
-pytest -q                                              # 50 tests, no network
+pytest -q                                              # 56 tests, no network
 ```
 
 Get the key at https://solami.dev → Dashboard → API keys → *Standard key*. The Free plan is enough for the
@@ -161,7 +163,7 @@ update exactly at `head − 300`.
 
 ## Tests
 
-`pytest -q` — 50 tests, no network: decoders on mainnet fixtures captured 2026-09-24, exact money math
+`pytest -q` — 56 tests, no network: decoders on mainnet fixtures captured 2026-09-24, exact money math
 (incl. the `div_ceil` BN semantics), rules and the daily book (fees on increase, partial-close continuity,
 anchor sources, restart), alert router (dry-run, min level, cooldown, token redaction), metrics (pings,
 lag clamp), transports on mocks — a mock Yellowstone gRPC server (ping/pong, drop, reconnect with
